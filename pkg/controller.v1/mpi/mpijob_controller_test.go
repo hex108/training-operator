@@ -17,6 +17,7 @@ package mpi
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	schedulingv1 "k8s.io/api/scheduling/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -36,6 +38,8 @@ import (
 const (
 	gpuResourceName         = "nvidia.com/gpu"
 	extendedGPUResourceName = "vendor-domain/gpu"
+	highPriorityClass       = "high-priority"
+	lowPriorityClass        = "low-priority"
 )
 
 func newMPIJobCommon(name string, startTime, completionTime *metav1.Time) *kubeflowv1.MPIJob {
@@ -126,6 +130,45 @@ func newMPIJobWithLauncher(name string, replicas *int32, pusPerReplica int64, re
 	}
 
 	return mpiJob
+}
+
+func newMPIJobWithGuaranteedWorker(name string, replicas *int32, pusPerReplica int64, garanteedPodNum int, resourceName string, startTime, completionTime *metav1.Time) *kubeflowv1.MPIJob {
+	mpiJob := newMPIJobWithLauncher(name, replicas, pusPerReplica, resourceName, startTime, completionTime)
+	if mpiJob.Spec.MPIReplicaSpecs[kubeflowv1.MPIJobReplicaTypeWorker].Template.Annotations == nil {
+		mpiJob.Spec.MPIReplicaSpecs[kubeflowv1.MPIJobReplicaTypeWorker].Template.Annotations = map[string]string{}
+	}
+	anno := mpiJob.Spec.MPIReplicaSpecs[kubeflowv1.MPIJobReplicaTypeWorker].Template.Annotations
+	anno[guaranteedPodNumKey] = strconv.Itoa(garanteedPodNum)
+	anno[highPriorityClassNameKey] = highPriorityClass
+	anno[lowPriorityClassNameKey] = lowPriorityClass
+
+	return mpiJob
+}
+
+func createPriorityClass() error {
+	// Create the high priority class
+	highPriority := &schedulingv1.PriorityClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: highPriorityClass,
+		},
+		Value:         1000,
+		GlobalDefault: false,
+	}
+	if err := testK8sClient.Create(context.Background(), highPriority); err != nil {
+		return err
+	}
+	// Create the low priority class
+	lowPriority := &schedulingv1.PriorityClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: lowPriorityClass,
+		},
+		Value:         10,
+		GlobalDefault: false,
+	}
+	if err := testK8sClient.Create(context.Background(), lowPriority); err != nil {
+		return err
+	}
+	return nil
 }
 
 var _ = Describe("MPIJob controller", func() {
@@ -507,6 +550,50 @@ var _ = Describe("MPIJob controller", func() {
 					launcherStatus) && ReplicaStatusMatch(created.Status.ReplicaStatuses, kubeflowv1.MPIJobReplicaTypeWorker,
 					workerStatus)
 			}, timeout, interval).Should(BeTrue())
+		})
+	})
+
+	Context("Test MPIJob with specified guaranteed worker Pods", func() {
+		It("Should contain desired ReplicaStatuses", func() {
+			By("By creating guaranteed worker pods with specified high priority")
+
+			ctx := context.Background()
+			startTime := metav1.Now()
+			completionTime := metav1.Now()
+
+			jobName := "test-guaranteed-worker"
+
+			var replicas int32 = 16
+			guaranteedPodNum := 5
+			mpiJob := newMPIJobWithGuaranteedWorker(jobName, &replicas, 1, guaranteedPodNum, gpuResourceName, &startTime, &completionTime)
+			Expect(testK8sClient.Create(ctx, mpiJob)).Should(Succeed())
+
+			Expect(createPriorityClass()).Should(BeNil())
+
+			for i := 0; i < int(replicas); i++ {
+				name := fmt.Sprintf("%s-%d", mpiJob.Name+workerSuffix, i)
+				worker := reconciler.newWorker(mpiJob, name)
+				workerKey := types.NamespacedName{
+					Namespace: metav1.NamespaceDefault,
+					Name:      worker.GetName(),
+				}
+				Eventually(func() error {
+					workerCreated := &corev1.Pod{}
+					if err := testK8sClient.Get(ctx, workerKey, workerCreated); err != nil {
+						return err
+					}
+					if i < guaranteedPodNum {
+						if workerCreated.Spec.PriorityClassName != highPriorityClass {
+							return fmt.Errorf("pod priority not right")
+						}
+					} else {
+						if workerCreated.Spec.PriorityClassName != lowPriorityClass {
+							return fmt.Errorf("pod priority not right")
+						}
+					}
+					return nil
+				}, timeout, interval).Should(BeNil())
+			}
 		})
 	})
 

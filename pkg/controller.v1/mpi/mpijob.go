@@ -75,6 +75,12 @@ const (
 
 	// volcanoTaskSpecKey task spec key used in pod annotation when EnableGangScheduling is true
 	volcanoTaskSpecKey = "volcano.sh/task-spec"
+
+	// When pod's index is not less than guaranteedPodNumKey(if set in pod spec's annotation),
+	// pod's priority will be set to highPriorityClassNameKey, otherwise set to lowPriorityClassNameKey.
+	guaranteedPodNumKey      = "fengluan.com/guaranteed-pod-num"
+	highPriorityClassNameKey = "fengluan.com/high-priority-name"
+	lowPriorityClassNameKey  = "fengluan.com/low-priority-name"
 )
 
 const (

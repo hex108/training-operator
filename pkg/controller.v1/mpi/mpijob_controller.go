@@ -970,6 +970,10 @@ func (jc *MPIJobReconciler) newWorker(mpiJob *kubeflowv1.MPIJob, name string) *c
 		podSpec.Labels[key] = value
 	}
 	setRestartPolicy(podSpec, mpiJob.Spec.MPIReplicaSpecs[kubeflowv1.MPIJobReplicaTypeWorker])
+	if err := setPriority(podSpec, name); err != nil {
+		klog.Errorf("Failed to set pod's priority: %s", err)
+		return nil
+	}
 	logger := commonutil.LoggerForReplica(mpiJob, strings.ToLower(string(kubeflowv1.MPIJobReplicaTypeLauncher)))
 	if len(podSpec.Spec.Containers) == 0 {
 		klog.Errorln("Worker pod does not have any containers in its spec")
@@ -1406,4 +1410,35 @@ func setRestartPolicy(podTemplateSpec *corev1.PodTemplateSpec, spec *commonv1.Re
 	} else {
 		podTemplateSpec.Spec.RestartPolicy = corev1.RestartPolicy(spec.RestartPolicy)
 	}
+}
+
+func setPriority(podTemplateSpec *corev1.PodTemplateSpec, podName string) error {
+	index, err := getPodIndex(podName)
+	if err != nil {
+		return err
+	}
+	s := podTemplateSpec.Annotations[guaranteedPodNumKey]
+	if len(s) == 0 {
+		return nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return err
+	}
+	if len(podTemplateSpec.Spec.PriorityClassName) != 0 {
+		return fmt.Errorf("pod's priority class has been set")
+	}
+	if index < n {
+		podTemplateSpec.Spec.PriorityClassName = podTemplateSpec.Annotations[highPriorityClassNameKey]
+	} else {
+		podTemplateSpec.Spec.PriorityClassName = podTemplateSpec.Annotations[lowPriorityClassNameKey]
+	}
+	return nil
+}
+
+// getPodIndex returns pod's index, suppose that podName which is in the style
+// of '%workerPrefix-%index'.
+func getPodIndex(podName string) (index int, err error) {
+	s := podName[strings.LastIndex(podName, "-")+1:]
+	return strconv.Atoi(s)
 }
